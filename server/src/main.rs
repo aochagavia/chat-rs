@@ -7,17 +7,25 @@ extern crate tokio_io;
 
 mod server;
 
-use std::cell::RefCell;
-use std::io;
+use std::{env, io};
 
 use futures::future;
-
-use protocol::async::ChatCodec;
+use tokio_core::reactor::Core;
 
 fn main() {
-    //async2();
-    //sync().ok();
-    async();
+    let mode = env::args().nth(1).unwrap_or(String::new());
+    if mode == "sync" {
+        sync().unwrap();
+    } else {
+        // Default to async
+        async()
+    }
+}
+
+fn async() {
+    let mut core = Core::new().expect("Unable to initialize tokio core");
+    server::start(&core.handle());
+    core.run(future::empty::<(), !>()).expect("Run failed");
 }
 
 fn sync() -> io::Result<()> {
@@ -62,13 +70,4 @@ fn sync() -> io::Result<()> {
     }
 
     Ok(())
-}
-
-fn async() {
-    use futures::future;
-    use tokio_core::reactor::Core;
-
-    let mut core = Core::new().expect("Unable to initialize tokio core");
-    server::start(&core.handle());
-    core.run(future::empty::<(), !>()).expect("Run failed");
 }

@@ -1,13 +1,11 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::io;
 use std::rc::Rc;
 
-use futures::{self, future, Async, AsyncSink, Future, Poll, Sink, Stream};
+use futures::{self, future, AsyncSink, Future, Sink, Stream};
 use futures::sync::mpsc::UnboundedSender;
 use tokio_core;
 use tokio_core::reactor::Handle;
-use tokio_core::net::{Incoming, TcpListener, TcpStream};
+use tokio_core::net::TcpListener;
 use tokio_io::{self, AsyncRead};
 
 use protocol::async::ChatCodec;
@@ -55,8 +53,8 @@ fn setup_client(handle: &Handle, msg_sink: MsgSink, msg_stream: MsgStream, activ
 }
 
 /// Broadcast a message to all active clients
-fn broadcast_message(handle: &Handle, m: String, active_clients: &ActiveClients) {
-    println!("Message received: {}", m);
+fn broadcast_message(msg: String, active_clients: &ActiveClients) {
+    println!("Message received: {}", msg);
 
     let mut active_clients = active_clients.borrow_mut();
     let mut deleted_indices = Vec::new();
@@ -66,26 +64,18 @@ fn broadcast_message(handle: &Handle, m: String, active_clients: &ActiveClients)
             continue;
         }
 
-        // FIXME: we are cloning too much... We should RC the string.
-        match client.sink.start_send(m.clone()) {
-            Ok(AsyncSink::Ready) => (),
-            Ok(AsyncSink::NotReady(_)) => {
+        match client.sink.start_send(msg.clone()).expect("unexpected error") {
+            AsyncSink::Ready => (),
+            AsyncSink::NotReady(_) => {
                 // The sink is full. If this happens we just drop the message
-                println!("Sink full, dropping message: {}", m)
-            }
-            Err(e) => {
-                // Buffer full or connection closed
-                println!("Buffer full or connection closed: {:?}", e)
+                println!("Sink full, dropping message: {}", msg)
             }
         }
 
         // Async flushing
-        match client.sink.poll_complete() {
-            Err(e) => {
-                println!("Connection closed");
-                deleted_indices.push(i);
-            }
-            _ => {}
+        if let Err(_) = client.sink.poll_complete() {
+            println!("Connection closed");
+            deleted_indices.push(i);
         }
     }
 
@@ -115,9 +105,8 @@ pub fn start(handle: &Handle) {
     }));
 
     // Broadcast incoming messages to all active clients
-    let owned_handle = handle.clone();
     handle.spawn(broadcast_rx.for_each(move |m| {
-        broadcast_message(&owned_handle, m, &active_clients);
+        broadcast_message(m, &active_clients);
         future::empty()
     }));
 }
