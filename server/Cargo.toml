@@ -1,0 +1,10 @@
+[package]
+name = "server"
+version = "0.1.0"
+authors = ["Adolfo Ochagavía <aochagavia92@gmail.com>"]
+
+[dependencies]
+protocol = { path = "../protocol" }
+futures = "0.1"
+tokio-core = "0.1"
+tokio-io = "0.1"
