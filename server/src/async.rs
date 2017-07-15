@@ -17,20 +17,12 @@ struct Client {
     sink: MsgSink,
 }
 
-struct Message {
-    from: u32,
-    text: String
-}
-
 pub fn run() {
     let mut core = Core::new().expect("Unable to initialize tokio core");
     start_server(&core.handle());
     core.run(future::empty::<(), ()>()).expect("Run failed");
 }
 
-/// Start the server
-///
-/// This function will spawn the necessary futures using the `Handle`
 pub fn start_server(handle: &Handle) {
     // The client information corresponding to all open connections will be kept in this vector
     let active_clients = Rc::new(RefCell::new(Vec::new()));
@@ -46,20 +38,19 @@ pub fn start_server(handle: &Handle) {
         println!("[debug] new client");
 
         let (msg_sink, msg_stream) = tcp_stream.0.framed(ChatCodec).split();
-        let msg_stream = msg_stream.map(move |text| Message { from: client_id, text });
         let msg_sink = msg_sink.buffer(100);
 
-        // Put incoming clients in the active_clients vector
+        // Track active clients
         active_clients.borrow_mut().push(Client {
             id: client_id,
             nickname: None,
             sink: msg_sink
         });
 
-        // Setup broadcasting of incoming messages to all active clients
+        // Setup broadcasting of incoming messages from this client to all other active clients
         let active_clients = active_clients.clone();
         owned_handle.spawn(msg_stream.for_each(move |msg| {
-            broadcast_message(msg, &active_clients);
+            broadcast_message(&active_clients, client_id, msg);
             future::ok(())
         }).map_err(|_| println!("[debug] connection closed")));
 
@@ -68,18 +59,18 @@ pub fn start_server(handle: &Handle) {
 }
 
 /// Broadcast a message to all active clients
-fn broadcast_message(msg: Message, active_clients: &ActiveClients) {
+fn broadcast_message(active_clients: &ActiveClients, client_id: u32, msg: String) {
     let mut active_clients = active_clients.borrow_mut();
 
     // Get the nickname of the client
     // If the nickname is None, it means that this message is the nickname!
     let message = {
-        let nickname = &mut active_clients.iter_mut().find(|c| c.id == msg.from).expect("Message from inactive client?").nickname;
+        let nickname = &mut active_clients.iter_mut().find(|c| c.id == client_id).expect("Message from inactive client?").nickname;
         match nickname.clone() {
-            Some(n) => format!("{}: {}", n, msg.text),
+            Some(n) => format!("{}: {}", n, msg),
             None => {
-                *nickname = Some(msg.text.clone());
-                format!("{} has logged in", msg.text)
+                *nickname = Some(msg.clone());
+                format!("{} has logged in", msg)
             }
         }
     };
@@ -98,7 +89,7 @@ fn broadcast_message(msg: Message, active_clients: &ActiveClients) {
         }
 
         // Don't send messages to yourself
-        if client.id == msg.from {
+        if client.id == client_id {
             continue;
         }
 
@@ -108,6 +99,7 @@ fn broadcast_message(msg: Message, active_clients: &ActiveClients) {
         }
 
         // We need `poll_complete` to flush the sink
+        // FIXME: is this correct? This is the code I am least confident with in this crate
         if let Err(_) = client.sink.poll_complete() {
             println!("[debug] connection closed");
             disconnected.push(i);

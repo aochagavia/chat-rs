@@ -20,12 +20,12 @@ impl Encoder for ChatCodec {
 
         if msg.len() > 255 {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                    "message is longer than 255 bytes"));
+                                      "message is longer than 255 bytes"));
         }
 
         let len = msg.len() as u8;
         dst.put_u8(len);
-        dst.write_str(&msg).expect("Argh");
+        dst.write_str(&msg).unwrap();
         Ok(())
     }
 }
