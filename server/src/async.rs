@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use futures::{future, sink, stream, AsyncSink, Future, Sink, Stream};
-use tokio_core::reactor::{Core, Handle};
+use tokio_core::reactor::Core;
 use tokio_core::net::{Incoming, TcpListener, TcpStream};
 use tokio_io::{codec, AsyncRead};
 
@@ -17,11 +17,11 @@ pub fn run() {
 
     let addr = "127.0.0.1:8080".parse().expect("Unable to parse socket address");
     let listener = TcpListener::bind(&addr, &handle).expect("Unable to launch tcp listener");
-    let server = gen_server(listener.incoming(), handle);
+    let server = gen_server(listener.incoming());
     core.run(server).expect("Run failed");
 }
 
-pub fn gen_server(listener: Incoming, handle: Handle) -> impl Future<Item=(), Error=()> {
+pub fn gen_server(listener: Incoming) -> impl Future<Item=(), Error=()> {
     let listener = listener.map_err(|e| panic!("Listener error: {}", e));
     let broadcaster = Rc::new(Broadcaster::default());
 
@@ -33,29 +33,25 @@ pub fn gen_server(listener: Incoming, handle: Handle) -> impl Future<Item=(), Er
 
         // Setup broadcasting of incoming messages from this client to all other active clients
         let broadcaster = broadcaster.clone();
-        handle.spawn(
-            msg_stream.into_future()
-                      .map_err(|_| println!("[debug] stream closed (into_future)"))
-                      .and_then(move |(opt_nickname, msg_stream)| {
-                // Only subscribe a client after we receive their nickname
-                let client_id = broadcaster.subscribe(msg_sink.buffer(100));
+        msg_stream.into_future()
+                  .map_err(|_| println!("[debug] stream closed (into_future)"))
+                  .and_then(move |(opt_nickname, msg_stream)| {
+            // Only subscribe a client after we receive their nickname
+            let client_id = broadcaster.subscribe(msg_sink.buffer(100));
 
-                // The nickname could be `None`, but that would mean the connection has been dropped
-                // Therefore we can use an empty nickname in that case, as the client will be removed anyway
-                let nickname = opt_nickname.unwrap_or(String::new());
-                broadcaster.broadcast(client_id, format!("{} has logged in", nickname));
+            // The nickname could be `None`, but that would mean the connection has been dropped
+            // Therefore we can use an empty nickname in that case, as the client will be removed anyway
+            let nickname = opt_nickname.unwrap_or(String::new());
+            broadcaster.broadcast(client_id, format!("{} has logged in", nickname));
 
-                // After receiving the nickname, messages only need to be forwarded
-                let broadcaster = broadcaster.clone();
-                msg_stream.for_each(move |msg| {
-                    let msg = format!("{}: {}", nickname, msg);
-                    broadcaster.broadcast(client_id, msg);
-                    future::ok(())
-                }).map_err(|_| println!("[debug] stream closed (for_each)"))
-            }).then(|_| Ok(()))  // Ignore errors
-        );
-
-        future::ok(())
+            // After receiving the nickname, messages only need to be forwarded
+            let broadcaster = broadcaster.clone();
+            msg_stream.for_each(move |msg| {
+                let msg = format!("{}: {}", nickname, msg);
+                broadcaster.broadcast(client_id, msg);
+                future::ok(())
+            }).map_err(|_| println!("[debug] stream closed (for_each)"))
+        }).then(|_| Ok(()))  // Ignore errors
     })
 }
 
