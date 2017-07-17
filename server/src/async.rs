@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use futures::{future, sink, stream, AsyncSink, Future, Sink, Stream};
 use tokio_core::reactor::{Core, Handle};
-use tokio_core::net::{TcpListener, TcpStream};
+use tokio_core::net::{Incoming, TcpListener, TcpStream};
 use tokio_io::{codec, AsyncRead};
 
 use protocol::async::ChatCodec;
@@ -13,48 +13,50 @@ type MsgSink = sink::Buffer<stream::SplitSink<codec::Framed<TcpStream, ChatCodec
 
 pub fn run() {
     let mut core = Core::new().expect("Unable to initialize tokio core");
-    start_server(&core.handle());
-    core.run(future::empty::<(), ()>()).expect("Run failed");
+    let handle = core.handle();
+
+    let addr = "127.0.0.1:8080".parse().expect("Unable to parse socket address");
+    let listener = TcpListener::bind(&addr, &handle).expect("Unable to launch tcp listener");
+    let server = gen_server(listener.incoming(), handle);
+    core.run(server).expect("Run failed");
 }
 
-pub fn start_server(handle: &Handle) {
+pub fn gen_server(listener: Incoming, handle: Handle) -> impl Future<Item=(), Error=()> {
+    let listener = listener.map_err(|e| panic!("Listener error: {}", e));
     let broadcaster = Rc::new(Broadcaster::default());
 
-    // Setup the listener
-    let addr = "127.0.0.1:8080".parse().expect("Unable to parse socket address");
-    let listener = TcpListener::bind(&addr, handle).expect("Unable to launch tcp listener").incoming();
-
     // Accept new connections and specify how incoming messages will be handled
-    let owned_handle = handle.clone();
-    handle.spawn(listener.for_each(move |(tcp_stream, _)| {
-        let (msg_sink, msg_stream) = tcp_stream.framed(ChatCodec).split();
-        let client_id = broadcaster.subscribe(msg_sink.buffer(100));
+    listener.for_each(move |(tcp_stream, _)| {
+        println!("[debug] new connection");
 
-        println!("[debug] new connection ({})", client_id);
+        let (msg_sink, msg_stream) = tcp_stream.framed(ChatCodec).split();
 
         // Setup broadcasting of incoming messages from this client to all other active clients
         let broadcaster = broadcaster.clone();
-        owned_handle.spawn(msg_stream.into_future().and_then(move |(opt_nickname, msg_stream)| {
-            // The first message is the nickname
-            let nickname = opt_nickname.unwrap_or(String::new());
-            broadcaster.broadcast(client_id, format!("{} has logged in", nickname));
+        handle.spawn(
+            msg_stream.into_future()
+                      .map_err(|_| println!("[debug] stream closed (into_future)"))
+                      .and_then(move |(opt_nickname, msg_stream)| {
+                // Only subscribe a client after we receive their nickname
+                let client_id = broadcaster.subscribe(msg_sink.buffer(100));
 
-            // All further messages can just be forwarded
-            let broadcaster = broadcaster.clone();
-            msg_stream.for_each(move |msg| {
-                let msg = format!("{}: {}", nickname, msg);
-                broadcaster.broadcast(client_id, msg);
-                future::ok(())
-            }).map_err(move |_| {
-                println!("[debug] stream closed ({})", client_id);
+                // The nickname could be `None`, but that would mean the connection has been dropped
+                // Therefore we can use an empty nickname in that case, as the client will be removed anyway
+                let nickname = opt_nickname.unwrap_or(String::new());
+                broadcaster.broadcast(client_id, format!("{} has logged in", nickname));
 
-                // FIXME: this panic should be removed, but the type system doesn't like it...
-                panic!()
-            })
-        }).map_err(|_| panic!("FIXME: What should we do?")));
+                // After receiving the nickname, messages only need to be forwarded
+                let broadcaster = broadcaster.clone();
+                msg_stream.for_each(move |msg| {
+                    let msg = format!("{}: {}", nickname, msg);
+                    broadcaster.broadcast(client_id, msg);
+                    future::ok(())
+                }).map_err(|_| println!("[debug] stream closed (for_each)"))
+            }).then(|_| Ok(()))  // Ignore errors
+        );
 
         future::ok(())
-    }).map_err(|e| panic!("Error listening to TCP connections: {}", e)));
+    })
 }
 
 #[derive(Default)]
